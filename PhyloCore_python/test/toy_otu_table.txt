@@ -1,0 +1,9 @@
+#Constructed from biom table
+#OTUID	RL186	RL205	RL251	RL200	RL203	RL197	RL241	taxonomy
+denovo0	1.0	10.0	10.0	1.0	0.0	10.0	10.0	k__Bacteria; p__Firmicutes; c__Clostridia; o__Clostridiales; f__Lachnospiraceae; g__; s__
+denovo1	1.0	1.0	1.0	10.0	1.0	0.0	1.0	k__Bacteria; p__Firmicutes; c__Clostridia; o__Clostridiales; f__Veillonellaceae; g__Megasphaera; s__
+denovo7	1.0	0.0	0.0	1.0	1.0	1.0	1.0	k__Bacteria; p__Firmicutes; c__Clostridia; o__Clostridiales; f__Lachnospiraceae; g__Blautia; s__
+denovo8	0.0	0.0	10.0	1.0	0.0	0.0	0.0	k__Bacteria; p__Firmicutes; c__Clostridia; o__Clostridiales; f__Ruminococcaceae; g__Ruminococcus; s__
+denovo9	10.0	10.0	10.0	10.0	1.0	1.0	1.0	k__Bacteria; p__Firmicutes; c__Erysipelotrichi; o__Erysipelotrichales; f__Erysipelotrichaceae; g__[Eubacterium]; s__biforme
+denovo14	0.0	0.0	0.0	1.0	0.0	1.0	0.0	k__Bacteria; p__Firmicutes; c__Clostridia; o__Clostridiales
+denovo15	0.0	0.0	0.0	0.0	0.0	0.0	1.0	k__Bacteria; p__Firmicutes; c__Clostridia; o__Clostridiales; f__Clostridiaceae
