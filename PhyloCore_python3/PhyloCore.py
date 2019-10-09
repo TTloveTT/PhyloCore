@@ -1,0 +1,371 @@
+import sys
+import getopt
+import re
+from Bio import Phylo
+
+########## Usage  ####################################
+otutable,otutree,samplelist = "","",""
+prevalence_cutoff = 0.9;
+abundance_cutoff = 0;
+LCA_cutoff = 0.8;
+output1 = "PhyloCore_distribution.txt"
+
+def usage():
+    print("Usage: python PhyloCore.py [options] \n\n\
+Options: \n\
+\t-h\tPrint a brief help message and exits..\n\
+\t-i\t(Required) Specify a OTU table. The OTU table needs to have taxonomy as the last column. See the file format requirement in readme file.\n\
+\t-t\t(Optional) Specify a OTU tree in the newick format.The OTU tree should contain OTUs in the OTU table.If OTU tree is not provided, PhyloCore will construct a tree with taxa provided in OTU table.\n\
+\t-s\t(Optional) Specify a sample ID list (with or without group information). Only samples in the list will be used in core identification. The group information, if provided, will be used to identify the weighted core nodes. For weighted core, provide a tab-delimited file in which the 1st column is sample ID and the 2nd column is group.\n\
+\t-o\t(Optional) Specify an output file name. Default: PhyloCore_distribution.txt in current directory\n\
+\t-p or --prevalence\t(Optional) Specify a threshold of prevanlence. A node will be considered as a core node if its prevalence is above the threshold. Default: 0.9\n\
+\t-a or --abundance\t(Optional) Specify a threshold of OTU abundance. OTUs with abundance lower than the threshold in a sample will be considered absent. Default: 0\n\
+\t-l or --lca_cutoff\t(Optional)Taxonomy majority threshold. The taxonomy of a core is assigned to be the lowest common taxonomy shared by the majority of its descendent OTUs. For example, a threshold of 0.8 means that the taxonomy of a core is assigned to be the lowest common taxonomy shared by at least 80% of its descendent OTUs. Default: 0.8. \n\
+Examples:\n\
+\tFind Core taxa with >=90% prevalence (default) in all samples\n\
+\t\tpython PhyloCore.py -i otu_table_taxon.txt \n\
+\tFind Core taxa with >=90% prevalence (default) in all samples given OTU tree\n\
+\t\tpython PhyloCore.py -i otu_table_taxon.txt -t rep_set.tre \n\
+\tFind Core taxa with >=80% prevalence in a subset of samples given OTU tree\n\
+\t\tpython PhyloCore.py -i otu_table_taxon.txt -t rep_set.tre -s ID_list.txt -p 0.8 \n\n")
+
+
+if len(sys.argv) == 1:
+    usage()
+    sys.exit()
+    
+try:
+    opts, args = getopt.getopt(sys.argv[1:], "hi:t:s:o:p:a:l:", ["help", "prevalence=","abundance=","lca_cutoff="])
+except getopt.GetoptError as err:
+        # print help information and exit:
+    print(err)  # will print something like "option -a not recognized"
+    print("See help: PhyloCore.py -h")
+    sys.exit(2)
+for o, a in opts:
+    if o in ("-h", "--help"):
+        usage()
+        sys.exit()
+    elif o in ("-i"):
+        otutable = a
+    elif o in ("-o"):
+        output1 = a
+    elif o in ("-t"):
+        otutree = a
+    elif o in ("-s"):
+        samplelist = a
+    elif o in ("-p","--prevalence"):
+        prevalence_cutoff = float(a)
+    elif o in ("-a","--abundance"):
+        abundance_cutoff = float(a)
+    elif o in ("--lca_cutoff"):
+        LCA_cutoff = float(a)
+    else:
+        assert False, "unhandled option"
+
+if not otutable:
+    usage()
+    sys.exit()
+
+    
+######### Declare variables ######################
+#table: otu table dict of dicts ; Taxon:otu->taxon pair; core_nodes: core node internalID ->core node pair  ; core_taxa: dict of dicts {core taxon}{OTU}= taxon ; samples: sampleIDs ;groups: dict of dicts {group}{sampleID} = 1
+
+
+class AutoVivification(dict):
+    """Implementation of perl's autovivification feature."""
+    def __getitem__(self, item):
+        try:
+            return dict.__getitem__(self, item)
+        except KeyError:
+            value = self[item] = type(self)()
+            return value
+
+table, groups,core_taxa = AutoVivification(), AutoVivification(), AutoVivification()
+Taxon,samples,reads,core_nodes,parents = {},{},{},{},{}
+
+
+
+########## Fuctions #######################
+#function 1 calculate prevalence(%) of a list of OTU IDs,given a list of subset and abundance cutoff
+def prevalence(testOTU):
+    exist = {}
+    preval = 0
+    for group in groups:
+        exist[group] = {}
+        for OTU in testOTU: #ignore OTUs in the tree but not in OTU table
+            if OTU in table: 	#Weight samples by group, prevalance = [exist(group A)/n(group A) + ...+ exist(group Z)/n(group Z)]/ # of groups
+                for sample in groups[group]: #only consider samples in subset list, calulate by group
+                    if table[OTU][sample]/reads[sample] > abundance_cutoff: #only consider abundant OTUs
+                        exist[group][sample] = 1
+    for group in exist:
+        preval += len(exist[group])*1.0 / len(groups[group])   #calculate prevalence  
+    return preval/len(groups)
+
+#function 2 traverse the tree, recursion, find core
+def all_parents(tree):
+    parents = {}
+    for clade in tree.find_clades(order='level'):
+        for child in clade:
+            parents[child] = clade
+    return parents
+
+
+def traverse(node):
+    leaves = []
+    if not node.is_terminal():
+        for offspring in node.get_terminals(): #get all leaves, namely OTU ID
+            leaves.append(offspring.name)
+    else:
+        leaves.append(node.name)
+    if prevalence(leaves) >= prevalence_cutoff:  #test condition here, prevalence cutoff
+        core_nodes[node.name] = node 
+        if node in parents and parents[node].name in core_nodes:
+            del core_nodes[parents[node].name] 
+        for child in node.clades: 
+            traverse(child)
+
+#function 3 make tree from taxonomy info of a list of OTUs
+
+def make_taxa_tree(list):  #list is a dictionary
+        #make tree from taxonomy info of a list of OTUs
+    tree = Phylo.BaseTree.Tree(Phylo.BaseTree.Clade(None,"k__Bacteria",None,None,None,0))
+     #use width to save how many leaves in each node
+    for otu in list:
+        levels = re.split(';\s*', list[otu])   #delimiter is (;+ any space) or ;
+        current_node = tree.root 
+        for i in range(1, len(levels)):
+            if re.match('__($|[a-z]$)|uncultured|norank', levels[i]):  #undefined taxa can be g__ in greengene, __g... and __uncultured in SILVA, ignore those.
+                break
+            offsprings = current_node.clades 
+            exist = False
+            for offspring in offsprings:
+                if offspring.name == levels[i]: 
+                    exist = True
+                    current_node.width += 1 
+                    current_node = offspring
+                    break
+            if not exist:
+                new_node = Phylo.BaseTree.Clade(None,levels[i],None,None,None,0)
+                current_node.clades.append(new_node)
+                current_node.width += 1
+                current_node = new_node
+        new_node = Phylo.BaseTree.Clade(None,otu,None,None,None,0)
+        current_node.clades.append(new_node)
+        current_node.width += 1
+    return tree
+
+#function 4 find lowest common taxonomy of a list of OTUs with taxa tree
+def findLCA(tree):  #taxa tree from make_taxa_tree()
+        #loop tree and find lowest common taxonomy
+    current_node = tree.root 
+    totalOTU = current_node.width
+    while(not current_node.is_terminal()):
+        offsprings = current_node.clades; 
+        flag = False
+        for offspring in offsprings:
+            if offspring.width >= LCA_cutoff * totalOTU:
+                current_node = offspring
+                flag = True
+                break
+        if not flag:
+            break
+
+    lineage = tree.get_path(current_node) 
+    taxon = ""
+    for l in lineage:
+        taxon += l.name + ";" 
+
+    for offspring in current_node.get_terminals():
+            core_taxa[current_node.name][offspring.name] = taxon 
+            #core_taxa: a dict of dicts , {core taxon}{OTU}= taxon 
+            
+            
+#######read in OTU table and save in a dict of dicts (table).######  
+header = None
+flag = False
+try:
+    with open(otutable, 'r') as f:  #to add input
+        for line in f:
+            line = line.rstrip('\n')
+            if re.match(".*OTU.*",line):
+                header = line
+                flag = True
+                break
+        if not flag:
+            print('OTU table does not have a correct header! (e.g OTUID,sampleID1,sampleID2 ...,sampleIDn,taxonomy)')
+            sys.exit()
+
+        sampleID = header.split('\t')
+        sampleID.pop(0)
+        sampleID.pop()
+            
+        for line in f:
+            line = line.rstrip('\n')
+            data = line.split('\t')
+            OTUID = data.pop(0)
+            taxon = data.pop()
+            if not re.match('[A-Za-z]',taxon):
+                print("Taxonomy column needed for OTU:", OTUID)
+                sys.exit()
+            for i in range(len(sampleID)):
+                if re.match('^\d+\.0$',data[i]) or re.match('^\d+0$',data[i]):
+                    data[i] = float(data[i])
+                    table[OTUID][sampleID[i]] = data[i]
+                    Taxon[OTUID]= taxon
+                    reads[sampleID[i]] = reads.get(sampleID[i], 0) + data[i]
+                    samples[sampleID[i]]=1
+                    groups["all"][sampleID[i]]=1
+                else:
+                    print("OTU table can only contain non-negative integer,",OTUID,"contains illegal number!")
+                    sys.exit()
+
+except IOError as exc:
+    print("Error:",otutable)
+    sys.exit(exc.strerror)
+   
+
+
+
+########read in a list of sample IDs user wants to test.########
+
+if samplelist:
+    try:
+        with open(samplelist, 'r') as f:  #to add input file name
+            subset = {}
+            subgroups =  AutoVivification()
+            for line in f:
+                line = line.rstrip('\n')
+                data = line.split()
+                if data[0] in samples:
+                    if len(data) == 2:
+                        subgroups[data[1]][data[0]] = 1
+                    elif len(data) == 1:
+                        subgroups["all"][data[0]] = 1
+                    else:
+                        print("Please check the format of sample list!")
+                        sys.exit()
+                    subset[data[0]] = 1
+                else:
+                    print(data[0] + "is not a correct sample ID or not in OTU table!")
+                    sys.exit() 
+            samples = subset
+            groups = subgroups
+
+    except IOError as exc:
+        print("Error:",samplelist)
+        sys.exit(exc.strerror)
+       
+   
+
+
+
+######################## Traverse the tree and find core nodes ##############################
+
+if not otutree:
+######## if OTU tree is not provided, generate tree based on taxonomy information in OTU table##########
+    tree = make_taxa_tree(Taxon)
+#Loop through the tree and find cores based on prevalence cutoff, this step will save the final core nodes in the dict core_nodes
+    rootnode = tree.root
+    parents = all_parents(tree)
+    traverse(rootnode)
+    for node in core_nodes:
+        lineage = tree.get_path(core_nodes[node]) 
+        full_taxa = ""
+        for l in lineage:
+            full_taxa += l.name + ";" 
+        #full_taxa += core_nodes[node].name 
+
+        #save core info in core_taxa: {core taxon}{OTU}= taxon   
+        if not core_nodes[node].is_terminal():   #if core is not OTU level
+            for offspring in core_nodes[node].get_terminals():
+                    core_taxa[core_nodes[node].name][offspring.name] = full_taxa 
+        else:   #if core is OTU level
+            core_taxa[core_nodes[node].name][core_nodes[node].name] = Taxon[core_nodes[node].name]
+
+else:
+######## if OTU tree is provided, use OTU tree ###########
+     #read in OTU newick tree and find root node
+     
+    try:
+        tree = Phylo.read(otutree,'newick')   #to add, change file name
+        rootnode=tree.root
+        parents = all_parents(tree)
+        
+        #loop through the tree and find cores based on prevalence cutoff, this step will save the final core nodes in the hash %core_nodes
+        traverse(rootnode)
+        
+        #find all OTUs within one core, find last common ancestor of all OTUs belong to the core node (except OTU level core), save all core taxa in %core_taxa.
+        for node in core_nodes:
+            core_OTUs = {}
+            if not core_nodes[node].is_terminal():#if core is not OTU level, then find the Last common ancestor.
+                for offspring in core_nodes[node].get_terminals(): #get all leaves, namely OTU ID
+                    if offspring.name in Taxon: 
+                        core_OTUs[offspring.name] = Taxon[offspring.name] 
+                taxa_tree = make_taxa_tree(core_OTUs) 
+                findLCA(taxa_tree)
+            else:  #if core is OTU level
+                core_taxa[core_nodes[node].name][core_nodes[node].name] = Taxon[core_nodes[node].name] 
+                        
+    except IOError as exc:
+        print("Error:",otutree)
+        sys.exit(exc.strerror)
+
+
+
+################### output  ############################
+
+#output OTU distribution in all samples
+try:
+    with open(output1, 'w') as f:    # to add, file name
+        output_all = ""
+        output_all += "Cores\t" + "\t".join(sampleID) + "\tTaxonomy\t" + "\n"
+        for taxon in sorted(core_taxa): 
+            if re.match('Bacteria', taxon):
+                continue
+            output_all += taxon + "\t"
+            for i in range(len(sampleID)):
+                sum = 0
+                for OTU in core_taxa[taxon]:
+                    sum += table[OTU][sampleID[i]]
+                output_all += str(1.0*sum/reads[sampleID[i]]) + "\t"
+            value = list(core_taxa[taxon].values())[0]
+            output_all += value + "\n"
+        #print >>f, output_all
+        print(output_all, file=f)
+        
+except IOError as exc:    
+    print("Error:",output1)
+    sys.exit(exc.strerror)
+
+
+#output OTU distribution in subset, if list provided.
+
+if samplelist:
+    output2 = "subset_" + output1
+    try:
+        with open(output2, 'w') as f1:
+            output_subset = ""
+            output_subset += "Cores\t"
+            for s in samples:
+                output_subset += s + "\t"
+            output_subset += "Taxonomy\n"
+            for taxon in sorted(core_taxa):
+                if re.match('Bacteria', taxon):
+                    continue
+                output_subset += taxon + "\t"
+                for s in samples:
+                    sum = 0
+                    for OTU in core_taxa[taxon]:
+                        sum += table[OTU][s]
+                    output_subset += str(1.0 * sum / reads[s]) + "\t"
+                value = list(core_taxa[taxon].values())[0]
+                output_subset += value + "\n"
+            #print >>f1, output_subset
+            print(output_subset, file=f1)
+
+    except IOError as exc:    
+        print("Error:",output2)
+        sys.exit(exc.strerror)
+
+
+print("Done!")
